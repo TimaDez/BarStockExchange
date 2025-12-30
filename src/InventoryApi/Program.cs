@@ -7,11 +7,12 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using Microsoft.OpenApi.Models;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+//builder.Services.AddSwaggerGen();
 
 builder.Services.AddDbContext<InventoryDbContext>(options =>
 {
@@ -22,6 +23,36 @@ builder.Services.AddDbContext<InventoryDbContext>(options =>
 var issuer = builder.Configuration["Jwt:Issuer"]!;
 var audience = builder.Configuration["Jwt:Audience"]!;
 var key = builder.Configuration["Jwt:Key"]!;
+
+builder.Services.AddSwaggerGen(c =>
+{
+    c.SwaggerDoc("v1", new OpenApiInfo { Title = "InventoryApi", Version = "v1" });
+
+    c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+    {
+        Name = "Authorization",
+        Type = SecuritySchemeType.Http,
+        Scheme = "bearer",
+        BearerFormat = "JWT",
+        In = ParameterLocation.Header,
+        Description = "Enter: Bearer {your JWT token}"
+    });
+
+    c.AddSecurityRequirement(new OpenApiSecurityRequirement
+    {
+        {
+            new OpenApiSecurityScheme
+            {
+                Reference = new OpenApiReference
+                {
+                    Type = ReferenceType.SecurityScheme,
+                    Id = "Bearer"
+                }
+            },
+            Array.Empty<string>()
+        }
+    });
+});
 
 builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
@@ -63,11 +94,18 @@ using (var scope = app.Services.CreateScope())
 
 static bool TryGetPubId(ClaimsPrincipal user, out Guid pubId)
 {
-    var pubIdStr = user.FindFirstValue("pub_id");
+    var pubIdStr =
+        user.FindFirstValue("pub_id") ??
+        user.FindFirstValue("PubId") ??
+        user.FindFirstValue("pubId");
+
     return Guid.TryParse(pubIdStr, out pubId);
 }
 
-static string? GetRole(ClaimsPrincipal user) => user.FindFirstValue("role");
+static string? GetRole(ClaimsPrincipal user) =>
+    user.FindFirstValue("role") ??
+    user.FindFirstValue("Role") ??
+    user.FindFirstValue(ClaimTypes.Role);
 
 // GET /api/inventory (רשימת מלאי לפאב)
 app.MapGet("/api/inventory", [Authorize] async (ClaimsPrincipal user, InventoryDbContext db) =>
