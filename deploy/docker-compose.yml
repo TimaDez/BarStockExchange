@@ -1,0 +1,119 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}" ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  auth-postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: authdb
+    ports:
+      - "5434:5432"
+    volumes:
+      - auth_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U app -d authdb" ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  authapi:
+    build:
+      context: ../src/AuthApi
+    ports:
+      - "5082:8080"
+    environment:
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__Db: Host=auth-postgres;Port=5432;Database=authdb;Username=app;Password=app
+      Jwt__Issuer: bar-stock-auth
+      Jwt__Audience: bar-stock-clients
+      Jwt__Key: "CHANGE_ME_SUPER_LONG_SECRET_KEY_AT_LEAST_32_CHARS"
+      Jwt__AccessTokenMinutes: "60"
+    depends_on:
+      auth-postgres:
+        condition: service_healthy
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+  seq:
+    image: datalust/seq:latest
+    restart: unless-stopped
+    environment:
+      ACCEPT_EULA: "Y"
+      SEQ_FIRSTRUN_ADMINPASSWORD: "Password123!@#"
+    ports:
+      - "5341:5341"
+      - "8081:80"
+    volumes:
+      - seqdata:/data
+
+  gatewayapi:
+    build:
+      context: ../src/GatewayApi
+    ports:
+      - "5081:8080"
+    environment:
+      ASPNETCORE_URLS: http://+:8080
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  orders-postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: ordersdb
+    ports:
+      - "5435:5432"
+    volumes:
+      - orders_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U app -d ordersdb" ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  ordersapi:
+    build:
+      context: ../src/OrdersApi
+    ports:
+      - "5083:8080"
+    environment:
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__Db: Host=orders-postgres;Port=5432;Database=ordersdb;Username=app;Password=app
+      Jwt__Issuer: bar-stock-auth
+      Jwt__Audience: bar-stock-clients
+      Jwt__Key: "CHANGE_ME_SUPER_LONG_SECRET_KEY_AT_LEAST_32_CHARS"
+    depends_on:
+      orders-postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  seqdata:
+  auth_pgdata:
+  orders_pgdata:
