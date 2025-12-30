@@ -49,6 +49,7 @@ app.UseSwaggerUI();
 
 app.MapGet("/", () => Results.Text("Inventory API is running", "text/plain"));
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+app.MapGet("/api/inventory/health", () => Results.Ok(new { status = "ok" }));
 
 app.UseAuthentication();
 app.UseAuthorization();
