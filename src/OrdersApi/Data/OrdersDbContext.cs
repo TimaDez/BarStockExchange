@@ -32,7 +32,17 @@ public sealed class OrdersDbContext : DbContext
     modelBuilder.Entity<Order>()
       .HasIndex(x => new { x.PubId, x.ClientRequestId })
       .IsUnique()
-      .HasFilter("\"ClientRequestId\" IS NOT NULL"); // NEW
+      .HasFilter("\"ClientRequestId\" IS NOT NULL");
+
+    modelBuilder.Entity<OutboxMessage>(b =>
+    {
+      b.ToTable("OutboxMessages");
+      b.HasKey(x => x.Id);
+      b.Property(x => x.Type).IsRequired();
+      b.Property(x => x.PayloadJson).IsRequired();
+      b.HasIndex(x => x.PublishedAtUtc);
+      b.HasIndex(x => x.OccurredAtUtc);
+    });
 
     base.OnModelCreating(modelBuilder);
   }

@@ -65,6 +65,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    volumes:
+      - rabbitmqdata:/var/lib/rabbitmq
 
   seq:
     image: datalust/seq:latest
@@ -164,3 +166,4 @@ volumes:
   auth_pgdata:
   orders_pgdata:
   inventory_pgdata:
+  rabbitmqdata:

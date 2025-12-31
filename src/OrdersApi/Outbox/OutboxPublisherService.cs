@@ -56,7 +56,15 @@ public sealed class OutboxPublisherService : BackgroundService
         msg.PublishAttempts++;
         msg.LastError = null;
 
-        var routingKey = msg.Type.ToLowerInvariant();
+        //var routingKey = msg.Type.ToLowerInvariant();
+        // NEW: dynamic routing map (no switch)
+        var routingMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+          [nameof(Events.OrderCreatedEvent)] = "orders.created"
+        };
+
+        var routingKey = routingMap.TryGetValue(msg.Type, out var rk) ? rk : msg.Type.ToLowerInvariant();
+
         await publisher.PublishAsync(routingKey, msg.Id.ToString("N"), msg.PayloadJson, msg.CorrelationId, ct);
 
         msg.PublishedAtUtc = DateTimeOffset.UtcNow;

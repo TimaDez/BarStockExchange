@@ -171,6 +171,23 @@ app.MapPost("/api/orders", [Authorize] async (
         db.Orders.Add(order);
         await db.SaveChangesAsync();
 
+        // NEW: write Outbox message (event) after DB commit
+        var total = order.Items.Sum(i => i.UnitPrice * i.Quantity);
+        var evt = new OrdersApi.Events.OrderCreatedEvent(order.Id, order.PubId, DateTimeOffset.UtcNow, total);
+
+        var payloadJson = System.Text.Json.JsonSerializer.Serialize(evt);
+
+        db.OutboxMessages.Add(new OutboxMessage
+        {
+            Id = Guid.NewGuid(),
+            OccurredAtUtc = DateTimeOffset.UtcNow,
+            Type = nameof(OrdersApi.Events.OrderCreatedEvent),
+            PayloadJson = payloadJson,
+            CorrelationId = httpContext.Request.Headers["X-Correlation-ID"].ToString()
+        });
+
+        await db.SaveChangesAsync();
+
         var response = new OrderResponse(
             order.Id,
             order.DisplayNumber,
