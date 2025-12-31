@@ -41,6 +41,10 @@ builder.Services
         };
     });
 
+
+var inventoryBaseUrl = builder.Configuration["Services:InventoryBaseUrl"] ?? "http://inventoryapi:8080";
+builder.Services.AddHttpClient("Inventory", client => { client.BaseAddress = new Uri(inventoryBaseUrl); });
+
 builder.Services.AddAuthorization();
 
 var app = builder.Build();

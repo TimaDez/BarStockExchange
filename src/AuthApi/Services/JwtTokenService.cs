@@ -31,7 +31,8 @@ public class JwtTokenService
       new(JwtRegisteredClaimNames.Sub, user.Id.ToString()),
       new(JwtRegisteredClaimNames.Email, user.Email),
       new("role", userPub.Role.ToString()),
-      new("pub_id", userPub.PubId.ToString())
+      new("pub_id", userPub.PubId.ToString()),
+      new(ClaimTypes.Role, userPub.Role.ToString())
     };
 
     var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_options.Key));

@@ -108,6 +108,7 @@ services:
       Jwt__Issuer: bar-stock-auth
       Jwt__Audience: bar-stock-clients
       Jwt__Key: "CHANGE_ME_SUPER_LONG_SECRET_KEY_AT_LEAST_32_CHARS"
+      Services__InventoryBaseUrl: http://inventoryapi:8080
     depends_on:
       orders-postgres:
         condition: service_healthy
