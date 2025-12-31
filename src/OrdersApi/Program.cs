@@ -1,5 +1,4 @@
 using System.Net;
-using System.Net.Http.Json;
 using System.Security.Claims;
 using System.Text;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -9,14 +8,12 @@ using Microsoft.IdentityModel.Tokens;
 using OrdersApi.Contracts;
 using OrdersApi.Data;
 using OrdersApi.Models;
+using OrdersApi.Outbox;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
-builder.Services.AddSingleton(rabbitOptions);
-builder.Services.AddSingleton<IRabbitMqPublisher, RabbitMqPublisher>();
-builder.Services.AddHostedService<OutboxPublisherService>();
 
 builder.Services.AddDbContext<OrdersDbContext>(options =>
 {
@@ -46,10 +43,18 @@ builder.Services
         };
     });
 
+
 var inventoryBaseUrl = builder.Configuration["Services:InventoryBaseUrl"] ?? "http://inventoryapi:8080";
 builder.Services.AddHttpClient("Inventory", client => { client.BaseAddress = new Uri(inventoryBaseUrl); });
 
 builder.Services.AddAuthorization();
+
+// RabbitMQ + Outbox // NEW
+var rabbitOptions = new RabbitMqOptions(); // NEW
+builder.Configuration.GetSection("RabbitMq").Bind(rabbitOptions); // NEW
+builder.Services.AddSingleton(rabbitOptions); // NEW
+builder.Services.AddSingleton<IRabbitMqPublisher, RabbitMqPublisher>(); // NEW
+builder.Services.AddHostedService<OutboxPublisherService>(); // NEW
 
 var app = builder.Build();
 
@@ -84,7 +89,7 @@ app.MapPost("/api/orders", [Authorize] async (
         ClaimsPrincipal user,
         OrdersDbContext db,
         IHttpClientFactory httpClientFactory,
-        HttpContext httpContext 
+        HttpContext httpContext
     ) =>
     {
         if (!TryGetPubId(user, out var pubId))
