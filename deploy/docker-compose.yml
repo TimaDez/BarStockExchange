@@ -57,6 +57,14 @@ services:
     ports:
       - "5672:5672"
       - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: app
+      RABBITMQ_DEFAULT_PASS: app
+    healthcheck:
+      test: [ "CMD", "rabbitmq-diagnostics", "-q", "ping" ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
 
   seq:
     image: datalust/seq:latest
@@ -109,8 +117,14 @@ services:
       Jwt__Audience: bar-stock-clients
       Jwt__Key: "CHANGE_ME_SUPER_LONG_SECRET_KEY_AT_LEAST_32_CHARS"
       Services__InventoryBaseUrl: http://inventoryapi:8080
+      RabbitMq__Host: rabbitmq
+      RabbitMq__User: app
+      RabbitMq__Password: app
+      RabbitMq__Exchange: bar.events
     depends_on:
       orders-postgres:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
 
   inventory-postgres:

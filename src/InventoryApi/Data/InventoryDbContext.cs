@@ -17,6 +17,11 @@ public sealed class InventoryDbContext : DbContext
       .HasIndex(x => new { x.PubId, x.Sku })
       .IsUnique();
 
+    modelBuilder.Entity<InventoryReservation>()
+      .HasIndex(x => new { x.PubId, x.RequestId })
+      .IsUnique()
+      .HasFilter("\"RequestId\" IS NOT NULL");
+
     base.OnModelCreating(modelBuilder);
   }
 }

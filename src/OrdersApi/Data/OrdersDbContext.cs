@@ -27,6 +27,11 @@ public sealed class OrdersDbContext : DbContext
       .Property(x => x.DisplayNumber)
       .ValueGeneratedOnAdd();
 
+    modelBuilder.Entity<Order>()
+      .HasIndex(x => new { x.PubId, x.ClientRequestId })
+      .IsUnique()
+      .HasFilter("\"ClientRequestId\" IS NOT NULL"); // NEW
+  
     base.OnModelCreating(modelBuilder);
   }
 }

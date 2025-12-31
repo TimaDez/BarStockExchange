@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Http.Json;
 using System.Security.Claims;
 using System.Text;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -12,6 +14,9 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+builder.Services.AddSingleton(rabbitOptions);
+builder.Services.AddSingleton<IRabbitMqPublisher, RabbitMqPublisher>();
+builder.Services.AddHostedService<OutboxPublisherService>();
 
 builder.Services.AddDbContext<OrdersDbContext>(options =>
 {
@@ -40,7 +45,6 @@ builder.Services
             ClockSkew = TimeSpan.FromSeconds(15)
         };
     });
-
 
 var inventoryBaseUrl = builder.Configuration["Services:InventoryBaseUrl"] ?? "http://inventoryapi:8080";
 builder.Services.AddHttpClient("Inventory", client => { client.BaseAddress = new Uri(inventoryBaseUrl); });
@@ -78,7 +82,10 @@ static string? GetRole(ClaimsPrincipal user) => user.FindFirstValue("role");
 app.MapPost("/api/orders", [Authorize] async (
         CreateOrderRequest req,
         ClaimsPrincipal user,
-        OrdersDbContext db) =>
+        OrdersDbContext db,
+        IHttpClientFactory httpClientFactory,
+        HttpContext httpContext 
+    ) =>
     {
         if (!TryGetPubId(user, out var pubId))
             return Results.Unauthorized();
@@ -90,6 +97,56 @@ app.MapPost("/api/orders", [Authorize] async (
         {
             if (string.IsNullOrWhiteSpace(item.Name) || item.Quantity <= 0 || item.UnitPrice < 0)
                 return Results.BadRequest(new { error = "Invalid item in order." });
+        }
+
+        // 3) OrdersApi – call Inventory Reserve BEFORE creating the order  // NEW
+        try
+        {
+            var inventoryClient = httpClientFactory.CreateClient("Inventory");
+
+            // Merge duplicate lines by SKU to avoid over-reserving when the same item appears multiple times
+            // (InventoryApi validates each line against the *original* quantity, so duplicates can slip through.) // NEW
+            var reserveLines = req.Items
+                .GroupBy(i => i.Name.Trim().ToUpperInvariant())
+                .Select(g => new InventoryReserveLine(g.Key, g.Sum(x => x.Quantity)))
+                .ToList();
+
+            var reserveReq = new InventoryReserveRequest(reserveLines);
+
+            // Forward user's bearer token to InventoryApi (Inventory is [Authorize]) // NEW
+            var authHeader = httpContext.Request.Headers.Authorization.ToString();
+
+            var invHttpReq = new HttpRequestMessage(HttpMethod.Post, "/api/inventory/reserve")
+            {
+                Content = JsonContent.Create(reserveReq)
+            };
+
+            if (!string.IsNullOrWhiteSpace(authHeader))
+                invHttpReq.Headers.TryAddWithoutValidation("Authorization", authHeader);
+
+            var invResp = await inventoryClient.SendAsync(invHttpReq);
+
+            if (invResp.StatusCode == HttpStatusCode.Conflict)
+            {
+                var details = await invResp.Content.ReadAsStringAsync();
+                return Results.Conflict(new { error = "Not enough stock", details });
+            }
+
+            if (!invResp.IsSuccessStatusCode)
+            {
+                var details = await invResp.Content.ReadAsStringAsync();
+                return Results.Problem(
+                    title: "Inventory reserve failed",
+                    detail: details,
+                    statusCode: (int)HttpStatusCode.BadGateway);
+            }
+        }
+        catch (HttpRequestException ex)
+        {
+            return Results.Problem(
+                title: "Inventory service unreachable",
+                detail: ex.Message,
+                statusCode: (int)HttpStatusCode.BadGateway);
         }
 
         var order = new Order
