@@ -29,10 +29,24 @@ public sealed class OrdersDbContext : DbContext
       .Property(x => x.DisplayNumber)
       .ValueGeneratedOnAdd();
 
+    // ✅ FIX: force EF to persist Total (not store-generated)
+    modelBuilder.Entity<Order>() // NEW
+      .Property(x => x.Total) // NEW
+      .HasPrecision(18, 2) // NEW (recommended)
+      .ValueGeneratedNever(); // NEW (this is the key)
+
     modelBuilder.Entity<Order>()
       .HasIndex(x => new { x.PubId, x.ClientRequestId })
       .IsUnique()
       .HasFilter("\"ClientRequestId\" IS NOT NULL");
+
+    modelBuilder.Entity<OrderItem>(b => // NEW/UPDATE
+    {
+      b.Property(x => x.Sku).IsRequired(); // NEW
+      b.HasIndex(x => new { x.OrderId, x.Sku }); // NEW (נוח לחיפושים)
+      b.Property(x => x.UnitPrice)
+        .HasPrecision(18, 2); // NEW (recommended)
+    });
 
     modelBuilder.Entity<OutboxMessage>(b =>
     {

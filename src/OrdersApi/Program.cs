@@ -1,36 +1,26 @@
 using System.Net;
+using System.Net.Http.Json; // FIX
 using System.Security.Claims;
 using System.Text;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using Microsoft.OpenApi.Models;
 using OrdersApi.Contracts;
 using OrdersApi.Data;
 using OrdersApi.Models;
 using OrdersApi.Outbox;
-using Microsoft.OpenApi.Models;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddEndpointsApiExplorer();
 
-builder.Services.AddDbContext<OrdersDbContext>(options =>
-{
-    var cs = builder.Configuration.GetConnectionString("Db");
-    options.UseNpgsql(cs);
-});
-
-// JWT validation (כמו Auth) — כל שירות צריך לאמת טוקן בעצמו
-var issuer = builder.Configuration["Jwt:Issuer"]!;
-var audience = builder.Configuration["Jwt:Audience"]!;
-var key = builder.Configuration["Jwt:Key"]!;
-
 builder.Services.AddSwaggerGen(c =>
 {
-    c.SwaggerDoc("v1", new OpenApiInfo { Title = "API", Version = "v1" }); // NEW (אפשר להתאים Title לכל שירות)
+    c.SwaggerDoc("v1", new OpenApiInfo { Title = "OrdersApi", Version = "v1" }); // FIX (title)
 
-    c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme // NEW
+    c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
     {
         Name = "Authorization",
         Type = SecuritySchemeType.Http,
@@ -40,7 +30,7 @@ builder.Services.AddSwaggerGen(c =>
         Description = "Enter: Bearer {your JWT token}"
     });
 
-    c.AddSecurityRequirement(new OpenApiSecurityRequirement // NEW
+    c.AddSecurityRequirement(new OpenApiSecurityRequirement
     {
         {
             new OpenApiSecurityScheme
@@ -55,6 +45,17 @@ builder.Services.AddSwaggerGen(c =>
         }
     });
 });
+
+builder.Services.AddDbContext<OrdersDbContext>(options =>
+{
+    var cs = builder.Configuration.GetConnectionString("Db");
+    options.UseNpgsql(cs);
+});
+
+// JWT validation (כמו Auth) — כל שירות צריך לאמת טוקן בעצמו
+var issuer = builder.Configuration["Jwt:Issuer"]!;
+var audience = builder.Configuration["Jwt:Audience"]!;
+var key = builder.Configuration["Jwt:Key"]!;
 
 builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
@@ -73,18 +74,17 @@ builder.Services
         };
     });
 
-
 var inventoryBaseUrl = builder.Configuration["Services:InventoryBaseUrl"] ?? "http://inventoryapi:8080";
 builder.Services.AddHttpClient("Inventory", client => { client.BaseAddress = new Uri(inventoryBaseUrl); });
 
 builder.Services.AddAuthorization();
 
-// RabbitMQ + Outbox // NEW
-var rabbitOptions = new RabbitMqOptions(); // NEW
-builder.Configuration.GetSection("RabbitMq").Bind(rabbitOptions); // NEW
-builder.Services.AddSingleton(rabbitOptions); // NEW
-builder.Services.AddSingleton<IRabbitMqPublisher, RabbitMqPublisher>(); // NEW
-builder.Services.AddHostedService<OutboxPublisherService>(); // NEW
+// RabbitMQ + Outbox
+var rabbitOptions = new RabbitMqOptions();
+builder.Configuration.GetSection("RabbitMq").Bind(rabbitOptions);
+builder.Services.AddSingleton(rabbitOptions);
+builder.Services.AddSingleton<IRabbitMqPublisher, RabbitMqPublisher>();
+builder.Services.AddHostedService<OutboxPublisherService>();
 
 var app = builder.Build();
 
@@ -97,7 +97,7 @@ app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 app.UseAuthentication();
 app.UseAuthorization();
 
-// Apply migrations on startup (כמו שהחלטנו כרגע)
+// Apply migrations on startup
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<OrdersDbContext>();
@@ -130,26 +130,30 @@ app.MapPost("/api/orders", [Authorize] async (
 
         foreach (var item in req.Items)
         {
-            if (string.IsNullOrWhiteSpace(item.Name) || item.Quantity <= 0 || item.UnitPrice < 0)
+            if (string.IsNullOrWhiteSpace(item.Sku) || item.Quantity <= 0)
                 return Results.BadRequest(new { error = "Invalid item in order." });
         }
 
-        // 3) OrdersApi – call Inventory Reserve BEFORE creating the order  // NEW
+        // Build reserve lines outside try so we can use later // FIX
+        var reserveLines = req.Items
+            .GroupBy(i => i.Sku.Trim().ToUpperInvariant())
+            .Select(g => new InventoryReserveLine(g.Key, g.Sum(x => x.Quantity)))
+            .ToList();
+
+        InventoryReserveResponse? reserveRespDto = null;
+
         try
         {
             var inventoryClient = httpClientFactory.CreateClient("Inventory");
-
-            // Merge duplicate lines by SKU to avoid over-reserving when the same item appears multiple times
-            // (InventoryApi validates each line against the *original* quantity, so duplicates can slip through.) // NEW
-            var reserveLines = req.Items
-                .GroupBy(i => i.Name.Trim().ToUpperInvariant())
-                .Select(g => new InventoryReserveLine(g.Key, g.Sum(x => x.Quantity)))
-                .ToList();
-
             var reserveReq = new InventoryReserveRequest(reserveLines);
 
-            // Forward user's bearer token to InventoryApi (Inventory is [Authorize]) // NEW
+            // Forward user's bearer token to InventoryApi (Inventory is [Authorize])
             var authHeader = httpContext.Request.Headers.Authorization.ToString();
+
+            // Correlation id (optional but useful)
+            var correlationId = httpContext.Request.Headers["X-Correlation-ID"].ToString();
+            if (string.IsNullOrWhiteSpace(correlationId))
+                correlationId = Guid.NewGuid().ToString("N"); // NEW fallback
 
             var invHttpReq = new HttpRequestMessage(HttpMethod.Post, "/api/inventory/reserve")
             {
@@ -159,6 +163,8 @@ app.MapPost("/api/orders", [Authorize] async (
             if (!string.IsNullOrWhiteSpace(authHeader))
                 invHttpReq.Headers.TryAddWithoutValidation("Authorization", authHeader);
 
+            invHttpReq.Headers.TryAddWithoutValidation("X-Correlation-ID", correlationId); // NEW
+
             var invResp = await inventoryClient.SendAsync(invHttpReq);
 
             if (invResp.StatusCode == HttpStatusCode.Conflict)
@@ -167,12 +173,22 @@ app.MapPost("/api/orders", [Authorize] async (
                 return Results.Conflict(new { error = "Not enough stock", details });
             }
 
+            // Check non-success BEFORE reading JSON // FIX
             if (!invResp.IsSuccessStatusCode)
             {
                 var details = await invResp.Content.ReadAsStringAsync();
                 return Results.Problem(
                     title: "Inventory reserve failed",
                     detail: details,
+                    statusCode: (int)HttpStatusCode.BadGateway);
+            }
+
+            reserveRespDto = await invResp.Content.ReadFromJsonAsync<InventoryReserveResponse>();
+
+            if (reserveRespDto?.Lines is null || reserveRespDto.Lines.Count == 0)
+            {
+                return Results.Problem(
+                    title: "Inventory reserve returned empty response",
                     statusCode: (int)HttpStatusCode.BadGateway);
             }
         }
@@ -183,29 +199,56 @@ app.MapPost("/api/orders", [Authorize] async (
                 detail: ex.Message,
                 statusCode: (int)HttpStatusCode.BadGateway);
         }
+        catch (TaskCanceledException ex)
+        {
+            return Results.Problem(
+                title: "Inventory reserve timed out",
+                detail: ex.Message,
+                statusCode: (int)HttpStatusCode.BadGateway);
+        }
+
+        var reservedBySku = reserveRespDto!.Lines
+            .ToDictionary(x => x.Sku.Trim().ToUpperInvariant(), x => x);
+
+        // Safety: ensure every requested sku exists in reserve response
+        foreach (var line in reserveLines)
+        {
+            if (!reservedBySku.ContainsKey(line.Sku))
+                return Results.Problem(title: "Inventory reserve missing sku", detail: line.Sku, statusCode: 502);
+        }
 
         var order = new Order
         {
             Id = Guid.NewGuid(),
             PubId = pubId,
             Status = OrderStatus.Pending,
-            Items = req.Items.Select(i => new OrderItem
+            Items = reserveLines.Select(l =>
             {
-                Id = Guid.NewGuid(),
-                Name = i.Name.Trim(),
-                Quantity = i.Quantity,
-                UnitPrice = i.UnitPrice
+                var r = reservedBySku[l.Sku];
+                return new OrderItem
+                {
+                    Id = Guid.NewGuid(),
+                    Sku = r.Sku, // NEW
+                    Name = r.Name.Trim(),
+                    Quantity = l.Quantity,
+                    UnitPrice = r.UnitPrice // snapshot from Inventory
+                };
             }).ToList()
         };
+
+        order.Total = order.Items.Sum(i => i.UnitPrice * i.Quantity);
 
         db.Orders.Add(order);
         await db.SaveChangesAsync();
 
-        // NEW: write Outbox message (event) after DB commit
-        var total = order.Items.Sum(i => i.UnitPrice * i.Quantity);
-        var evt = new OrdersApi.Events.OrderCreatedEvent(order.Id, order.PubId, DateTimeOffset.UtcNow, total);
+        // Outbox message after DB commit
+        var evt = new OrdersApi.Events.OrderCreatedEvent(order.Id, order.PubId, DateTimeOffset.UtcNow, order.Total);
 
         var payloadJson = System.Text.Json.JsonSerializer.Serialize(evt);
+
+        var corrId = httpContext.Request.Headers["X-Correlation-ID"].ToString();
+        if (string.IsNullOrWhiteSpace(corrId))
+            corrId = Guid.NewGuid().ToString("N"); // NEW
 
         db.OutboxMessages.Add(new OutboxMessage
         {
@@ -213,7 +256,7 @@ app.MapPost("/api/orders", [Authorize] async (
             OccurredAtUtc = DateTimeOffset.UtcNow,
             Type = nameof(OrdersApi.Events.OrderCreatedEvent),
             PayloadJson = payloadJson,
-            CorrelationId = httpContext.Request.Headers["X-Correlation-ID"].ToString()
+            CorrelationId = corrId
         });
 
         await db.SaveChangesAsync();
@@ -222,9 +265,12 @@ app.MapPost("/api/orders", [Authorize] async (
             order.Id,
             order.DisplayNumber,
             order.PubId,
+            order.Total,
             order.Status,
             order.CreatedAt,
-            order.Items.Select(i => new OrderItemResponse(i.Name, i.Quantity, i.UnitPrice)).ToList());
+            order.Items.Select(i => new OrderItemResponse(i.Sku, i.Name, i.Quantity, i.UnitPrice)).ToList()
+        );
+
 
         return Results.Created($"/api/orders/{order.Id}", response);
     })
@@ -250,9 +296,11 @@ app.MapGet("/api/orders/{id:guid}", [Authorize] async (
             order.Id,
             order.DisplayNumber,
             order.PubId,
+            order.Total,
             order.Status,
             order.CreatedAt,
-            order.Items.Select(i => new OrderItemResponse(i.Name, i.Quantity, i.UnitPrice)).ToList());
+            order.Items.Select(i => new OrderItemResponse(i.Sku, i.Name, i.Quantity, i.UnitPrice)).ToList()
+        );
 
         return Results.Ok(response);
     })

@@ -1,7 +1,11 @@
 namespace OrdersApi.Contracts;
 
-// NEW: Contract that matches InventoryApi.Contracts.ReserveRequest
-// We keep it here to avoid a project reference between services.
+// Request to InventoryApi
 public sealed record InventoryReserveRequest(List<InventoryReserveLine> Lines);
 
 public sealed record InventoryReserveLine(string Sku, int Quantity);
+
+// Response from InventoryApi (pricing snapshot)
+public sealed record InventoryReserveResponse(List<InventoryReservedLine> Lines);
+
+public sealed record InventoryReservedLine(string Sku, string Name, decimal UnitPrice, int Quantity);

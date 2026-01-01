@@ -1,7 +1,11 @@
-using OrdersApi.Models;
-
 namespace OrdersApi.Contracts;
 
-public record CreateOrderItemRequest(string Name, int Quantity, decimal UnitPrice);
+public sealed record CreateOrderRequest(
+  List<CreateOrderItemRequest> Items,
+  string? RequestId = null
+);
 
-public record CreateOrderRequest(List<CreateOrderItemRequest> Items, string? RequestId = null);
+public sealed record CreateOrderItemRequest(
+  string Sku,
+  int Quantity
+);

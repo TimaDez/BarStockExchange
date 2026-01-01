@@ -1,13 +1,18 @@
-using OrdersApi.Models;
-
 namespace OrdersApi.Contracts;
 
-public record OrderItemResponse(string Name, int Quantity, decimal UnitPrice);
-
-public record OrderResponse(
+public sealed record OrderResponse(
   Guid Id,
-  int DisplayNumber,
+  long DisplayNumber,
   Guid PubId,
-  OrderStatus Status,
+  decimal Total,
+  Models.OrderStatus Status,
   DateTimeOffset CreatedAt,
-  List<OrderItemResponse> Items);
+  List<OrderItemResponse> Items
+);
+
+public sealed record OrderItemResponse(
+  string Sku, // NEW
+  string Name,
+  int Quantity,
+  decimal UnitPrice
+);
