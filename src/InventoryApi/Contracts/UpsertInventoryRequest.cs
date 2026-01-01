@@ -1,3 +1,3 @@
 namespace InventoryApi.Contracts;
 
-public sealed record UpsertInventoryRequest(string Sku, string Name, int Quantity);
+public sealed record UpsertInventoryRequest(string Sku, string Name, int Quantity, decimal UnitPrice);

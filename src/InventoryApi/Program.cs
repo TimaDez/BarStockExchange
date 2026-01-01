@@ -134,8 +134,8 @@ app.MapPut("/api/inventory", [Authorize] async (
         if (role is not ("Admin" or "PubOwner"))
             return Results.Forbid();
 
-        if (string.IsNullOrWhiteSpace(req.Sku) || req.Quantity < 0)
-            return Results.BadRequest(new { error = "Invalid sku/quantity" });
+        if (string.IsNullOrWhiteSpace(req.Sku) || req.Quantity < 0 || req.UnitPrice < 0)
+            return Results.BadRequest(new { error = "Invalid sku/quantity/unitPrice" });
 
         var sku = req.Sku.Trim().ToUpperInvariant();
         var name = string.IsNullOrWhiteSpace(req.Name) ? sku : req.Name.Trim();
@@ -150,6 +150,7 @@ app.MapPut("/api/inventory", [Authorize] async (
                 Sku = sku,
                 Name = name,
                 Quantity = req.Quantity,
+                UnitPrice = req.UnitPrice,
                 UpdatedAt = DateTimeOffset.UtcNow
             };
             db.Items.Add(item);
@@ -158,6 +159,7 @@ app.MapPut("/api/inventory", [Authorize] async (
         {
             item.Name = name;
             item.Quantity = req.Quantity;
+            item.UnitPrice = req.UnitPrice;
             item.UpdatedAt = DateTimeOffset.UtcNow;
         }
 
@@ -210,7 +212,20 @@ app.MapPost("/api/inventory/reserve", [Authorize] async (
         await db.SaveChangesAsync();
         await tx.CommitAsync();
 
-        return Results.Ok(new { ok = true });
+        // NEW: return pricing snapshot for OrdersApi
+        var itemBySku = items.ToDictionary(x => x.Sku, x => x);
+
+        var reservedLines = req.Lines
+            .Select(l =>
+            {
+                var sku = l.Sku.Trim().ToUpperInvariant();
+                var it = itemBySku[sku];
+                return new ReservedLine(it.Sku, it.Name, it.UnitPrice, l.Quantity);
+            })
+            .ToList();
+
+        return Results.Ok(new ReserveResponse(reservedLines));
+
     })
     .WithTags("Inventory");
 
