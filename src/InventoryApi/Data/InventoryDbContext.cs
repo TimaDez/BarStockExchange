@@ -10,6 +10,7 @@ public sealed class InventoryDbContext : DbContext
   }
 
   public DbSet<InventoryItem> Items => Set<InventoryItem>();
+  public DbSet<InventoryReservation> Reservations => Set<InventoryReservation>();
 
   protected override void OnModelCreating(ModelBuilder modelBuilder)
   {

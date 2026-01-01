@@ -9,11 +9,11 @@ using OrdersApi.Contracts;
 using OrdersApi.Data;
 using OrdersApi.Models;
 using OrdersApi.Outbox;
+using Microsoft.OpenApi.Models;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
 
 builder.Services.AddDbContext<OrdersDbContext>(options =>
 {
@@ -25,6 +25,36 @@ builder.Services.AddDbContext<OrdersDbContext>(options =>
 var issuer = builder.Configuration["Jwt:Issuer"]!;
 var audience = builder.Configuration["Jwt:Audience"]!;
 var key = builder.Configuration["Jwt:Key"]!;
+
+builder.Services.AddSwaggerGen(c =>
+{
+    c.SwaggerDoc("v1", new OpenApiInfo { Title = "API", Version = "v1" }); // NEW (אפשר להתאים Title לכל שירות)
+
+    c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme // NEW
+    {
+        Name = "Authorization",
+        Type = SecuritySchemeType.Http,
+        Scheme = "bearer",
+        BearerFormat = "JWT",
+        In = ParameterLocation.Header,
+        Description = "Enter: Bearer {your JWT token}"
+    });
+
+    c.AddSecurityRequirement(new OpenApiSecurityRequirement // NEW
+    {
+        {
+            new OpenApiSecurityScheme
+            {
+                Reference = new OpenApiReference
+                {
+                    Type = ReferenceType.SecurityScheme,
+                    Id = "Bearer"
+                }
+            },
+            Array.Empty<string>()
+        }
+    });
+});
 
 builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)

@@ -1,5 +1,6 @@
 using System.Text;
 using RabbitMQ.Client;
+using OrdersApi.Outbox;
 
 namespace OrdersApi.Outbox;
 
