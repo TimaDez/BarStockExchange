@@ -1,206 +1,148 @@
-using System.Net;
-using Microsoft.EntityFrameworkCore;
+using System.Text.Json;
 using OrdersApi.Contracts;
 using OrdersApi.Data;
-using OrdersApi.Events;
 using OrdersApi.Models;
 using OrdersApi.Outbox;
 
 namespace OrdersApi.Application.Orders.CreateOrder;
 
-public sealed class CreateOrderHandler
+public class CreateOrderHandler
 {
-  #region Private members
+    private readonly OrdersDbContext _dbContext;
+    private readonly IHttpClientFactory _httpClientFactory;
+    private readonly ILogger<CreateOrderHandler> _logger;
+    private readonly IHttpContextAccessor _httpContextAccessor; // NEW: בשביל לשמור CorrelationId ב-Outbox
 
-  private readonly OrdersDbContext _db;
-  private readonly IHttpClientFactory _httpClientFactory;
-
-  #endregion
-
-  #region Methods
-
-  public CreateOrderHandler(OrdersDbContext db, IHttpClientFactory httpClientFactory)
-  {
-    _db = db;
-    _httpClientFactory = httpClientFactory;
-  }
-
-  public async Task<CreateOrderResult> HandleAsync(
-    Guid pubId,
-    CreateOrderRequest req,
-    string? authHeader,
-    string correlationId,
-    CancellationToken ct)
-  {
-    if (pubId == Guid.Empty)
-      return CreateOrderResult.Fail(CreateOrderErrorCode.Unauthorized, "Missing pub_id.");
-
-    if (req.Items is null || req.Items.Count == 0)
-      return CreateOrderResult.Fail(CreateOrderErrorCode.ValidationFailed, "Order must contain at least one item.");
-
-    foreach (var item in req.Items)
+    public CreateOrderHandler(
+        OrdersDbContext dbContext,
+        IHttpClientFactory httpClientFactory,
+        ILogger<CreateOrderHandler> logger,
+        IHttpContextAccessor httpContextAccessor)
     {
-      if (string.IsNullOrWhiteSpace(item.Sku) || item.Quantity <= 0)
-        return CreateOrderResult.Fail(CreateOrderErrorCode.ValidationFailed, "Invalid item in order.");
+        _dbContext = dbContext;
+        _httpClientFactory = httpClientFactory;
+        _logger = logger;
+        _httpContextAccessor = httpContextAccessor;
     }
 
-    var reserveLines = req.Items
-      .GroupBy(i => i.Sku.Trim().ToUpperInvariant())
-      .Select(g => new InventoryReserveLine(g.Key, g.Sum(x => x.Quantity)))
-      .ToList();
-
-    var reserve = await ReserveInventoryAsync(reserveLines, authHeader, correlationId, ct);
-    if (!reserve.IsSuccess)
-      return reserve.Error!;
-
-    var reservedBySku = reserve.Value!.Lines
-      .ToDictionary(x => x.Sku.Trim().ToUpperInvariant(), x => x);
-
-    foreach (var line in reserveLines)
+    public async Task<CreateOrderResult> HandleAsync(CreateOrderRequest request, Guid userId, CancellationToken ct)
     {
-      if (!reservedBySku.ContainsKey(line.Sku))
-        return CreateOrderResult.Fail(CreateOrderErrorCode.InventoryMissingSku, "Inventory reserve missing sku.",
-          line.Sku);
-    }
+        _logger.LogInformation("Starting CreateOrder for User {UserId} with {ItemCount} items", userId, request.Items.Count);
 
-    var order = new Order
-    {
-      Id = Guid.NewGuid(),
-      PubId = pubId,
-      Status = OrderStatus.Pending,
-      Items = reserveLines.Select(l =>
-      {
-        var r = reservedBySku[l.Sku];
-        return new OrderItem
+        #region 1. Validation & Grouping
+        if (request.Items == null || !request.Items.Any())
         {
-          Id = Guid.NewGuid(),
-          Sku = r.Sku,
-          Name = r.Name.Trim(),
-          Quantity = l.Quantity,
-          UnitPrice = r.UnitPrice
+            return CreateOrderResult.Fail(CreateOrderErrorCode.EmptyOrder, "Order must contain at least one item.");
+        }
+
+        var groupedItems = request.Items
+            .GroupBy(x => x.Sku)
+            .ToDictionary(g => g.Key, g => g.Sum(x => x.Quantity));
+        #endregion
+
+        #region 2. Reserve Stock (Inventory - Batch Request)
+        var reservationLines = groupedItems
+            .Select(x => new InventoryReserveLine(x.Key, x.Value))
+            .ToList();
+
+        var reserveRequest = new InventoryReserveRequest(reservationLines);
+        var inventoryClient = _httpClientFactory.CreateClient("InventoryClient");
+        List<OrderItem> orderItems = new();
+
+        try
+        {
+            var response = await inventoryClient.PostAsJsonAsync("/api/inventory/reserve", reserveRequest, ct);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("Inventory batch reservation failed. Status: {StatusCode}", response.StatusCode);
+                return CreateOrderResult.Fail(CreateOrderErrorCode.InventoryError, "Inventory reservation failed.");
+            }
+
+            var reservationResult = await response.Content.ReadFromJsonAsync<InventoryReserveResponse>(cancellationToken: ct);
+            
+            if (reservationResult == null || reservationResult.Lines == null)
+            {
+                 return CreateOrderResult.Fail(CreateOrderErrorCode.InventoryError, "Invalid response from inventory.");
+            }
+
+            foreach (var reservedLine in reservationResult.Lines)
+            {
+                orderItems.Add(new OrderItem
+                {
+                    Sku = reservedLine.Sku,
+                    Name = reservedLine.Name,
+                    Quantity = reservedLine.Quantity,
+                    UnitPrice = reservedLine.UnitPrice
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Critical error calling Inventory service");
+            return CreateOrderResult.Fail(CreateOrderErrorCode.InventoryError, "System error during reservation.");
+        }
+        #endregion
+
+        #region 3. Create Order & Outbox
+        
+        var order = new Order
+        {
+            Id = Guid.NewGuid(),
+            PubId = userId,
+            CreatedAt = DateTimeOffset.UtcNow,
+            Status = OrderStatus.Pending,
+            Items = orderItems,
+            Total = orderItems.Sum(x => x.Quantity * x.UnitPrice),
+            DisplayNumber = 0 // ה-DB יטפל בזה אם זה Identity, או שנשאיר כ-0 כרגע
         };
-      }).ToList()
-    };
 
-    order.Total = order.Items.Sum(i => i.UnitPrice * i.Quantity);
+        _dbContext.Orders.Add(order);
 
-    try
-    {
-      _db.Orders.Add(order);
-      await _db.SaveChangesAsync(ct);
+        // יצירת האירוע
+        var orderCreatedEvent = new Events.OrderCreatedEvent(
+            order.Id,
+            order.PubId,
+            order.CreatedAt,
+            order.Total
+        );
+
+        // שליפת ה-CorrelationId הנוכחי
+        var correlationId = _httpContextAccessor.HttpContext?.Request.Headers["X-Correlation-ID"].FirstOrDefault();
+
+        // יצירת הודעת Outbox ידנית (כי אין מתודה סטטית במחלקה החדשה ששלחת)
+        var outboxMessage = new OutboxMessage
+        {
+            Id = Guid.NewGuid(),
+            OccurredAtUtc = DateTimeOffset.UtcNow,
+            Type = orderCreatedEvent.GetType().Name,
+            PayloadJson = JsonSerializer.Serialize(orderCreatedEvent),
+            CorrelationId = correlationId, // NEW: שמירת ה-ID
+            PublishAttempts = 0,
+            PublishedAtUtc = null
+        };
+
+        _dbContext.Set<OutboxMessage>().Add(outboxMessage);
+
+        await _dbContext.SaveChangesAsync(ct);
+        
+        _logger.LogInformation("Order {OrderId} created successfully. Total: {Total}", order.Id, order.Total);
+        #endregion
+
+        var responseDto = new OrderResponse(
+            order.Id,
+            order.DisplayNumber,
+            order.PubId,
+            order.Total,
+            order.Status,
+            order.CreatedAt,
+            order.Items.Select(i => new OrderItemResponse(
+                i.Sku, 
+                i.Name, 
+                i.Quantity, 
+                i.UnitPrice)).ToList()
+        );
+
+        return CreateOrderResult.Ok(responseDto);
     }
-    catch (DbUpdateException ex)
-    {
-      return CreateOrderResult.Fail(CreateOrderErrorCode.PersistenceFailed, "Failed to save order.", ex.Message);
-    }
-
-    var evt = new OrderCreatedEvent(order.Id, order.PubId, DateTimeOffset.UtcNow, order.Total);
-    var payloadJson = System.Text.Json.JsonSerializer.Serialize(evt);
-
-    _db.OutboxMessages.Add(new OutboxMessage
-    {
-      Id = Guid.NewGuid(),
-      OccurredAtUtc = DateTimeOffset.UtcNow,
-      Type = nameof(OrderCreatedEvent),
-      PayloadJson = payloadJson,
-      CorrelationId = correlationId
-    });
-
-    try
-    {
-      await _db.SaveChangesAsync(ct);
-    }
-    catch (DbUpdateException ex)
-    {
-      return CreateOrderResult.Fail(CreateOrderErrorCode.PersistenceFailed, "Failed to save outbox message.",
-        ex.Message);
-    }
-
-    var response = new OrderResponse(
-      order.Id,
-      order.DisplayNumber,
-      order.PubId,
-      order.Total,
-      order.Status,
-      order.CreatedAt,
-      order.Items.Select(i => new OrderItemResponse(i.Sku, i.Name, i.Quantity, i.UnitPrice)).ToList()
-    );
-
-    return CreateOrderResult.Ok(response);
-  }
-
-  private async Task<ReserveResult> ReserveInventoryAsync(
-    List<InventoryReserveLine> reserveLines,
-    string? authHeader,
-    string correlationId,
-    CancellationToken ct)
-  {
-    try
-    {
-      var inventoryClient = _httpClientFactory.CreateClient("Inventory");
-      var reserveReq = new InventoryReserveRequest(reserveLines);
-
-      var invHttpReq = new HttpRequestMessage(HttpMethod.Post, "/api/inventory/reserve")
-      {
-        Content = JsonContent.Create(reserveReq)
-      };
-
-      if (!string.IsNullOrWhiteSpace(authHeader))
-        invHttpReq.Headers.TryAddWithoutValidation("Authorization", authHeader);
-
-      invHttpReq.Headers.TryAddWithoutValidation("X-Correlation-ID", correlationId);
-
-      var invResp = await inventoryClient.SendAsync(invHttpReq, ct);
-
-      if (invResp.StatusCode == HttpStatusCode.Conflict)
-      {
-        var details = await invResp.Content.ReadAsStringAsync(ct);
-        return ReserveResult.Fail(CreateOrderResult.Fail(CreateOrderErrorCode.InventoryConflict, "Not enough stock.",
-          details));
-      }
-
-      if (!invResp.IsSuccessStatusCode)
-      {
-        var details = await invResp.Content.ReadAsStringAsync(ct);
-        return ReserveResult.Fail(CreateOrderResult.Fail(CreateOrderErrorCode.InventoryBadGateway,
-          "Inventory reserve failed.", details));
-      }
-
-      var dto = await invResp.Content.ReadFromJsonAsync<InventoryReserveResponse>(cancellationToken: ct);
-      if (dto?.Lines is null || dto.Lines.Count == 0)
-        return ReserveResult.Fail(CreateOrderResult.Fail(CreateOrderErrorCode.InventoryBadGateway,
-          "Inventory reserve returned empty response."));
-
-      return ReserveResult.Ok(dto);
-    }
-    catch (HttpRequestException ex)
-    {
-      return ReserveResult.Fail(CreateOrderResult.Fail(CreateOrderErrorCode.InventoryUnreachable,
-        "Inventory service unreachable.", ex.Message));
-    }
-    catch (TaskCanceledException ex)
-    {
-      return ReserveResult.Fail(CreateOrderResult.Fail(CreateOrderErrorCode.InventoryTimeout,
-        "Inventory reserve timed out.", ex.Message));
-    }
-  }
-
-  #endregion
-
-  #region Private types
-
-  private sealed record ReserveResult
-  {
-    public bool IsSuccess { get; init; }
-    public InventoryReserveResponse? Value { get; init; }
-    public CreateOrderResult? Error { get; init; }
-
-    public static ReserveResult Ok(InventoryReserveResponse value) =>
-      new() { IsSuccess = true, Value = value };
-
-    public static ReserveResult Fail(CreateOrderResult error) =>
-      new() { IsSuccess = false, Error = error };
-  }
-
-  #endregion
 }

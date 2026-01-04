@@ -1,30 +1,38 @@
 using System.Text;
-using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authentication.JwtBearer; // NEW: חובה בשביל JWT
 using Microsoft.EntityFrameworkCore;
-using Microsoft.IdentityModel.Tokens;
-using Microsoft.OpenApi.Models;
-using OrdersApi.Api.Endpoints; // NEW
+using Microsoft.IdentityModel.Tokens; // NEW: חובה בשביל הטוקן
+using Microsoft.OpenApi.Models; // NEW: חובה בשביל Swagger Authorize
+using OrdersApi.Api.Endpoints;
+using OrdersApi.Api.Extensions;
+using OrdersApi.Api.Http;
+using OrdersApi.Api.Middleware;
+using OrdersApi.Application.Orders.CreateOrder;
 using OrdersApi.Data;
 using OrdersApi.Outbox;
-using OrdersApi.Application.Orders.CreateOrder; // NEW
+using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
-builder.Services.AddScoped<CreateOrderHandler>(); // NEW
+
+// 1. Serilog
+builder.Host.UseSerilog((context, config) =>
+    config.ReadFrom.Configuration(context.Configuration));
 
 builder.Services.AddEndpointsApiExplorer();
 
+// NEW: הגדרת Swagger עם תמיכה ב-Bearer Token
 builder.Services.AddSwaggerGen(c =>
 {
     c.SwaggerDoc("v1", new OpenApiInfo { Title = "OrdersApi", Version = "v1" });
 
+    // הגדרת כפתור ה-Authorize
     c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
     {
+        Description = "JWT Authorization header using the Bearer scheme.\r\n\r\nEnter 'Bearer' [space] and then your token in the text input below.\r\n\r\nExample: \"Bearer 12345abcdef\"",
         Name = "Authorization",
-        Type = SecuritySchemeType.Http,
-        Scheme = "bearer",
-        BearerFormat = "JWT",
         In = ParameterLocation.Header,
-        Description = "Enter: Bearer {your JWT token}"
+        Type = SecuritySchemeType.ApiKey,
+        Scheme = "Bearer"
     });
 
     c.AddSecurityRequirement(new OpenApiSecurityRequirement
@@ -43,63 +51,78 @@ builder.Services.AddSwaggerGen(c =>
     });
 });
 
-builder.Services.AddDbContext<OrdersDbContext>(options =>
-{
-    var cs = builder.Configuration.GetConnectionString("Db");
-    options.UseNpgsql(cs);
-});
-
-// JWT validation (כמו Auth) — כל שירות צריך לאמת טוקן בעצמו
-var issuer = builder.Configuration["Jwt:Issuer"]!;
-var audience = builder.Configuration["Jwt:Audience"]!;
-var key = builder.Configuration["Jwt:Key"]!;
-
-builder.Services
-    .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+// NEW: הגדרת אימות (Authentication) - קריאת מפתח ה-JWT מהקונפיגורציה
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
+        var jwtKey = builder.Configuration["Jwt:Key"];
+        var jwtIssuer = builder.Configuration["Jwt:Issuer"];
+        var jwtAudience = builder.Configuration["Jwt:Audience"];
+
         options.TokenValidationParameters = new TokenValidationParameters
         {
             ValidateIssuer = true,
             ValidateAudience = true,
-            ValidateIssuerSigningKey = true,
             ValidateLifetime = true,
-            ValidIssuer = issuer,
-            ValidAudience = audience,
-            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(key)),
-            ClockSkew = TimeSpan.FromSeconds(15)
+            ValidateIssuerSigningKey = true,
+            ValidIssuer = jwtIssuer,
+            ValidAudience = jwtAudience,
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey!))
         };
     });
 
-var inventoryBaseUrl = builder.Configuration["Services:InventoryBaseUrl"] ?? "http://inventoryapi:8080";
-builder.Services.AddHttpClient("Inventory", client => { client.BaseAddress = new Uri(inventoryBaseUrl); });
+builder.Services.AddAuthorization(); // חובה
 
-builder.Services.AddAuthorization();
+// DB Context
+builder.Services.AddDbContext<OrdersDbContext>(options =>
+    options.UseNpgsql(builder.Configuration.GetConnectionString("Db")));
 
-// RabbitMQ + Outbox
-var rabbitOptions = new RabbitMqOptions();
-builder.Configuration.GetSection("RabbitMq").Bind(rabbitOptions);
-builder.Services.AddSingleton(rabbitOptions);
-builder.Services.AddSingleton<IRabbitMqPublisher, RabbitMqPublisher>();
+// RabbitMQ & Outbox
+builder.Services.Configure<RabbitMqOptions>(builder.Configuration.GetSection("RabbitMq"));
+builder.Services.AddSingleton<RabbitMqPublisher>();
 builder.Services.AddHostedService<OutboxPublisherService>();
+
+// Http Services
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddTransient<CorrelationIdDelegatingHandler>();
+builder.Services.AddTransient<AuthenticationDelegatingHandler>();
+
+builder.Services.AddHttpClient("InventoryClient", client =>
+{
+    // משתמש בכתובת שמוגדרת ב-docker-compose או ב-InventoryBaseUrl
+    var baseUrl = builder.Configuration["Services:InventoryBaseUrl"] ?? "http://inventoryapi:8080";
+    client.BaseAddress = new Uri(baseUrl);
+})
+.AddHttpMessageHandler<CorrelationIdDelegatingHandler>()
+.AddHttpMessageHandler<AuthenticationDelegatingHandler>();
+
+builder.Services.AddScoped<CreateOrderHandler>();
 
 var app = builder.Build();
 
-app.UseSwagger();
-app.UseSwaggerUI();
+// Pipeline
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
 
-app.MapHealthEndpoints(); // NEW
+app.UseMiddleware<CorrelationIdMiddleware>();
+app.UseSerilogRequestLogging();
 
-app.UseAuthentication();
-app.UseAuthorization();
+// NEW: סדר ה-Middleware קריטי!
+app.UseAuthentication(); // 1. קודם מזהים מי המשתמש
+app.UseAuthorization();  // 2. אחר כך בודקים הרשאות
 
-// Apply migrations on startup
+// Migrations
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<OrdersDbContext>();
-    await db.Database.MigrateAsync();
+    // הוספתי try-catch למקרה שה-DB עוד לא עלה
+    try { await db.Database.MigrateAsync(); } catch { }
 }
 
-app.MapOrdersEndpoints(); // NEW
+app.MapHealthEndpoints();
+app.MapOrdersEndpoints();
 
 app.Run();

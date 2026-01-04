@@ -9,5 +9,7 @@ public enum CreateOrderErrorCode
   InventoryTimeout,
   InventoryUnreachable,
   InventoryMissingSku,
-  PersistenceFailed
+  PersistenceFailed,
+  EmptyOrder,
+  InventoryError
 }

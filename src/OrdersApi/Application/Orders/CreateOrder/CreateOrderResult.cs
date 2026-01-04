@@ -13,25 +13,29 @@ public sealed record CreateOrderResult
   public string? ErrorMessage { get; init; }
   public string? ErrorDetails { get; init; }
 
-  #endregion
+    #endregion
 
-  #region Methods
+    #region Methods
 
-  public static CreateOrderResult Ok(OrderResponse response) =>
-    new()
+    public static CreateOrderResult Ok(OrderResponse response)
     {
-      IsSuccess = true,
-      Response = response
-    };
+        return new CreateOrderResult()
+        {
+            IsSuccess = true,
+            Response = response
+        };
+    }
 
-  public static CreateOrderResult Fail(CreateOrderErrorCode code, string message, string? details = null) =>
-    new()
+    public static CreateOrderResult Fail(CreateOrderErrorCode code, string message, string? details = null)
     {
-      IsSuccess = false,
-      ErrorCode = code,
-      ErrorMessage = message,
-      ErrorDetails = details
-    };
+        return new CreateOrderResult()
+        {
+            IsSuccess = false,
+            ErrorCode = code,
+            ErrorMessage = message,
+            ErrorDetails = details
+        };
+    }
 
-  #endregion
+    #endregion
 }
