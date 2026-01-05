@@ -115,7 +115,7 @@ services:
     environment:
       ASPNETCORE_ENVIRONMENT: Development
       ASPNETCORE_URLS: http://+:8080
-      ConnectionStrings__DefaultConnection: Host=orders-postgres;Port=5432;Database=ordersdb;Username=app;Password=app
+      ConnectionStrings__Db: Host=orders-postgres;Port=5432;Database=ordersdb;Username=app;Password=app
       Jwt__Issuer: bar-stock-auth
       Jwt__Audience: bar-stock-clients
       Jwt__Key: "CHANGE_ME_SUPER_LONG_SECRET_KEY_AT_LEAST_32_CHARS"
