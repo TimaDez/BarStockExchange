@@ -18,6 +18,46 @@ public class RabbitMqPublisher : IAsyncDisposable
         _logger = logger;
     }
 
+    // התיקון: הוספת הפרמטר השלישי correlationId
+    public async Task<bool> PublishAsync(string routingKey, OutboxMessage message, string? correlationId)
+    {
+        await EnsureConnectionAsync();
+
+        if (_channel is not { IsOpen: true })
+        {
+            _logger.LogWarning("Cannot publish message, channel is closed.");
+            return false;
+        }
+
+        var body = Encoding.UTF8.GetBytes(message.PayloadJson);
+
+        // יצירת Properties ושמירת ה-CorrelationId
+        var props = new BasicProperties
+        {
+            CorrelationId = correlationId,
+            MessageId = message.Id.ToString(),
+            Persistent = true
+        };
+
+        try
+        {
+            await _channel.BasicPublishAsync(
+                exchange: _options.Exchange,
+                routingKey: routingKey,
+                mandatory: false,
+                basicProperties: props,
+                body: body);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to publish message to RabbitMQ");
+            return false;
+        }
+
+        _logger.LogInformation("Published message '{RoutingKey}' with CorrelationId '{CorrelationId}'", routingKey, correlationId);
+        return true;
+    }
+
     private async Task EnsureConnectionAsync()
     {
         if (_connection is { IsOpen: true } && _channel is { IsOpen: true })
@@ -50,38 +90,8 @@ public class RabbitMqPublisher : IAsyncDisposable
         catch (Exception ex)
         {
             _logger.LogError(ex, "Could not connect to RabbitMQ.");
+            throw;
         }
-    }
-
-    // התיקון: הוספת הפרמטר השלישי correlationId
-    public async Task PublishAsync(string routingKey, string message, string? correlationId)
-    {
-        await EnsureConnectionAsync();
-
-        if (_channel is not { IsOpen: true })
-        {
-            _logger.LogWarning("Cannot publish message, channel is closed.");
-            return;
-        }
-
-        var body = Encoding.UTF8.GetBytes(message);
-
-        // יצירת Properties ושמירת ה-CorrelationId
-        var props = new BasicProperties
-        {
-            CorrelationId = correlationId,
-            MessageId = Guid.NewGuid().ToString(),
-            Persistent = true
-        };
-        
-        await _channel.BasicPublishAsync(
-            exchange: _options.Exchange,
-            routingKey: routingKey,
-            mandatory: false,
-            basicProperties: props,
-            body: body);
-
-        _logger.LogInformation("Published message '{RoutingKey}' with CorrelationId '{CorrelationId}'", routingKey, correlationId);
     }
 
     public async ValueTask DisposeAsync()

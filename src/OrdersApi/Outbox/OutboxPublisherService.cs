@@ -55,15 +55,24 @@ public class OutboxPublisherService : BackgroundService
         foreach (var message in messages)
         {
             try
-            {
-                // התיקון: העברת 3 פרמטרים (Type, Payload, CorrelationId)
-                await _publisher.PublishAsync(message.Type, message.PayloadJson, message.CorrelationId);
+            {             
+                var resultOk = await _publisher.PublishAsync(message.Type, message, message.CorrelationId);
 
-                message.PublishedAtUtc = DateTimeOffset.UtcNow;
-                message.PublishAttempts++;
-                message.LastError = null;
+                if(resultOk)
+                {
+                    message.PublishedAtUtc = DateTimeOffset.UtcNow;
+                    message.PublishAttempts++;
+                    message.LastError = null;
+                    
+                    _logger.LogInformation("Message {MessageId} published.", message.Id);
+                }
+                else
+                {
+                    message.PublishAttempts++;
+                    message.LastError = "Failed to publish message to RabbitMQ";
+                    _logger.LogError("Failed to publish message {MessageId}", message.Id);
+                }
                 
-                _logger.LogInformation("Message {MessageId} published.", message.Id);
             }
             catch (Exception ex)
             {

@@ -30,6 +30,7 @@ public class CreateOrderHandler
         _logger.LogInformation("Starting CreateOrder for User {UserId} with {ItemCount} items", userId, request.Items.Count);
 
         #region 1. Validation & Grouping
+        
         if (request.Items == null || !request.Items.Any())
         {
             return CreateOrderResult.Fail(CreateOrderErrorCode.EmptyOrder, "Order must contain at least one item.");
@@ -38,6 +39,7 @@ public class CreateOrderHandler
         var groupedItems = request.Items
             .GroupBy(x => x.Sku)
             .ToDictionary(g => g.Key, g => g.Sum(x => x.Quantity));
+        
         #endregion
 
         #region 2. Reserve Stock (Inventory - Batch Request)

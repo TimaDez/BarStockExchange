@@ -1,10 +1,9 @@
 using System.Text;
-using Microsoft.AspNetCore.Authentication.JwtBearer; // NEW: חובה בשביל JWT
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.IdentityModel.Tokens; // NEW: חובה בשביל הטוקן
-using Microsoft.OpenApi.Models; // NEW: חובה בשביל Swagger Authorize
+using Microsoft.IdentityModel.Tokens;
+using Microsoft.OpenApi.Models;
 using OrdersApi.Api.Endpoints;
-using OrdersApi.Api.Extensions;
 using OrdersApi.Api.Http;
 using OrdersApi.Api.Middleware;
 using OrdersApi.Application.Orders.CreateOrder;
@@ -15,8 +14,7 @@ using Serilog;
 var builder = WebApplication.CreateBuilder(args);
 
 // 1. Serilog
-builder.Host.UseSerilog((context, config) =>
-    config.ReadFrom.Configuration(context.Configuration));
+builder.Host.UseSerilog((context, config) => config.ReadFrom.Configuration(context.Configuration));
 
 builder.Services.AddEndpointsApiExplorer();
 
