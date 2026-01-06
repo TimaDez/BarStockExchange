@@ -19,10 +19,18 @@ public class RabbitMqPublisher : IAsyncDisposable
     }
 
     // התיקון: הוספת הפרמטר השלישי correlationId
-    public async Task<bool> PublishAsync(string routingKey, OutboxMessage message, string? correlationId)
+    public async Task<bool> PublishAsync(string routingKey, OutboxMessage message)
     {
-        await EnsureConnectionAsync();
-
+        try
+        {
+            await EnsureConnectionAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "RabbitMQ connection is not available. Cannot publish message {MessageId}", message.Id);
+            return false;
+        }
+        
         if (_channel is not { IsOpen: true })
         {
             _logger.LogWarning("Cannot publish message, channel is closed.");
@@ -34,7 +42,7 @@ public class RabbitMqPublisher : IAsyncDisposable
         // יצירת Properties ושמירת ה-CorrelationId
         var props = new BasicProperties
         {
-            CorrelationId = correlationId,
+            CorrelationId = message.CorrelationId,
             MessageId = message.Id.ToString(),
             Persistent = true
         };
@@ -47,15 +55,22 @@ public class RabbitMqPublisher : IAsyncDisposable
                 mandatory: false,
                 basicProperties: props,
                 body: body);
+            
+            _logger.LogInformation(
+                "Published message '{RoutingKey}' (MessageId: {MessageId}) with CorrelationId '{CorrelationId}'",
+                routingKey,
+                props.MessageId,
+                message.CorrelationId);
+
+            return true;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to publish message to RabbitMQ");
+           // NEW: if publish fails, cleanup so next attempt reconnects cleanly
+            _logger.LogError(ex, "Failed to publish message {MessageId} to RabbitMQ. Cleaning up connection.", message.Id);
+            await CleanupConnectionAsync(); // NEW
             return false;
         }
-
-        _logger.LogInformation("Published message '{RoutingKey}' with CorrelationId '{CorrelationId}'", routingKey, correlationId);
-        return true;
     }
 
     private async Task EnsureConnectionAsync()
@@ -89,14 +104,55 @@ public class RabbitMqPublisher : IAsyncDisposable
         }
         catch (Exception ex)
         {
+            // NEW: cleanup and rethrow so caller can treat as publish failure
             _logger.LogError(ex, "Could not connect to RabbitMQ.");
+            await CleanupConnectionAsync();
             throw;
         }
     }
 
+   // NEW: central cleanup for runtime reconnects + dispose
+    private async Task CleanupConnectionAsync()
+    {
+        // Close channel first
+        if (_channel != null)
+        {
+            try
+            {
+                if (_channel.IsOpen)
+                    await _channel.CloseAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error while closing RabbitMQ channel.");
+            }
+            finally
+            {
+                _channel = null;
+            }
+        }
+
+        // Then close connection
+        if (_connection != null)
+        {
+            try
+            {
+                if (_connection.IsOpen)
+                    await _connection.CloseAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error while closing RabbitMQ connection.");
+            }
+            finally
+            {
+                _connection = null;
+            }
+        }
+    }
+    
     public async ValueTask DisposeAsync()
     {
-        if (_channel != null) await _channel.CloseAsync();
-        if (_connection != null) await _connection.CloseAsync();
+        await CleanupConnectionAsync();
     }
 }

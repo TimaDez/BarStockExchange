@@ -30,7 +30,7 @@ public class CreateOrderHandler
         _logger.LogInformation("Starting CreateOrder for User {UserId} with {ItemCount} items", userId, request.Items.Count);
 
         #region 1. Validation & Grouping
-        
+
         if (request.Items == null || !request.Items.Any())
         {
             return CreateOrderResult.Fail(CreateOrderErrorCode.EmptyOrder, "Order must contain at least one item.");
@@ -119,9 +119,12 @@ public class CreateOrderHandler
             OccurredAtUtc = DateTimeOffset.UtcNow,
             Type = orderCreatedEvent.GetType().Name,
             PayloadJson = JsonSerializer.Serialize(orderCreatedEvent),
-            CorrelationId = correlationId, // NEW: שמירת ה-ID
+            CorrelationId = correlationId,
             PublishAttempts = 0,
-            PublishedAtUtc = null
+            PublishedAtUtc = null,
+            NextAttemptAtUtc = DateTimeOffset.UtcNow,
+            DeadLetteredAtUtc = null,
+            LastError = null
         };
 
         _dbContext.Set<OutboxMessage>().Add(outboxMessage);
