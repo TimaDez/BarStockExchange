@@ -19,7 +19,3 @@ public sealed record InventoryReserveFailed(
     Guid OrderId,
     string Reason,
     DateTimeOffset FailedAtUtc);
-
-// Shared lines
-// public sealed record InventoryReserveLine(string Sku, int Quantity);
-//public sealed record InventoryReservedLine(string Sku, string Name, decimal UnitPrice, int Quantity);

@@ -49,17 +49,17 @@ public class OutboxPublisherService : BackgroundService
         using var scope = _serviceProvider.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<OrdersDbContext>();
 
-        var now = DateTimeOffset.UtcNow; // NEW
+        var now = DateTimeOffset.UtcNow;
 
          // NEW: only take messages that are due, not dead-lettered, and under max attempts
         var messages = await dbContext.Set<OutboxMessage>()
             .Where(m =>
                 m.PublishedAtUtc == null &&
-                m.DeadLetteredAtUtc == null &&                         // NEW
-                m.PublishAttempts < MaxPublishAttempts &&              // NEW
-                (m.NextAttemptAtUtc == null || m.NextAttemptAtUtc <= now)) // NEW
+                m.DeadLetteredAtUtc == null &&                      
+                m.PublishAttempts < MaxPublishAttempts &&           
+                (m.NextAttemptAtUtc == null || m.NextAttemptAtUtc <= now)) 
             .OrderBy(m => m.OccurredAtUtc)
-            .Take(BatchSize)                                          // CHANGED (const)
+            .Take(BatchSize)                                          
             .ToListAsync(ct);
         
         if (!messages.Any()) 
@@ -82,31 +82,10 @@ public class OutboxPublisherService : BackgroundService
                     continue;
                 }
                 
-                // NEW: schedule next retry with backoff (or dead-letter)
-                if (message.PublishAttempts >= MaxPublishAttempts)
-                {
-                    message.DeadLetteredAtUtc = DateTimeOffset.UtcNow;
-                    message.NextAttemptAtUtc = null;
-                    message.LastError = "Max publish attempts reached. Message moved to dead-letter state.";
-
-                    _logger.LogError(
-                        "Message {MessageId} moved to dead-letter after {Attempts} attempts.",
-                        message.Id,
-                        message.PublishAttempts);
-
+                if (TryDeadLetter(message, lastError: "Max publish attempts reached. Message moved to dead-letter state."))
                     continue;
-                }
 
-                var delay = ComputeBackoffDelay(message.PublishAttempts);
-                message.NextAttemptAtUtc = DateTimeOffset.UtcNow.Add(delay);
-                message.LastError = $"Publish failed. Next attempt in {delay.TotalSeconds:0}s.";
-
-                _logger.LogWarning(
-                    "Failed to publish message {MessageId}. Attempt {Attempt}/{MaxAttempts}. Next attempt at {NextAttemptAtUtc}.",
-                    message.Id,
-                    message.PublishAttempts,
-                    MaxPublishAttempts,
-                    message.NextAttemptAtUtc);
+                SetDelayOnPublishFailed(message, now);
             }
             catch (Exception ex)
             {
@@ -114,37 +93,78 @@ public class OutboxPublisherService : BackgroundService
                 message.PublishAttempts++;
                 message.LastError = ex.Message;
 
-                if (message.PublishAttempts >= MaxPublishAttempts)
-                {
-                    message.DeadLetteredAtUtc = DateTimeOffset.UtcNow;
-                    message.NextAttemptAtUtc = null;
-
-                    _logger.LogError(
-                        ex,
-                        "Message {MessageId} moved to dead-letter after {Attempts} attempts (exception).",
-                        message.Id,
-                        message.PublishAttempts);
-
+                if (TryDeadLetter(message, ex))
                     continue;
-                }
 
-                var delay = ComputeBackoffDelay(message.PublishAttempts);
-                message.NextAttemptAtUtc = DateTimeOffset.UtcNow.Add(delay);
-
-                _logger.LogError(
-                    ex,
-                    "Exception while publishing message {MessageId}. Attempt {Attempt}/{MaxAttempts}. Next attempt at {NextAttemptAtUtc}.",
-                    message.Id,
-                    message.PublishAttempts,
-                    MaxPublishAttempts,
-                    message.NextAttemptAtUtc);
+                SetDelayOnPublishException(message, ex, now);
             }
-        }
 
-        await dbContext.SaveChangesAsync(ct);
+            await dbContext.SaveChangesAsync(ct);
+        }
     }
 
-    // NEW: exponential backoff with cap + small jitter
+    private bool TryDeadLetter(OutboxMessage message, Exception? ex = null, string? lastError = null)
+    {
+        if (message.PublishAttempts < MaxPublishAttempts)
+            return false;
+
+        message.DeadLetteredAtUtc = DateTimeOffset.UtcNow;
+        message.NextAttemptAtUtc = null;
+
+        if (!string.IsNullOrWhiteSpace(lastError))
+            message.LastError = lastError;
+
+        if (ex is null)
+        {
+            _logger.LogError(
+                "Message {MessageId} moved to dead-letter after {Attempts} attempts.",
+                message.Id,
+                message.PublishAttempts);
+        }
+        else
+        {
+            _logger.LogError(
+                ex,
+                "Message {MessageId} moved to dead-letter after {Attempts} attempts (exception).",
+                message.Id,
+                message.PublishAttempts);
+        }
+
+        return true;
+    }
+
+    private void SetDelayOnPublishFailed(OutboxMessage message, DateTimeOffset? now = null)
+    {
+        var utcNow = now ?? DateTimeOffset.UtcNow;
+
+        var delay = ComputeBackoffDelay(message.PublishAttempts);
+        message.NextAttemptAtUtc = utcNow.Add(delay);
+        message.LastError = $"Publish failed. Next attempt in {delay.TotalSeconds:0}s.";
+
+        _logger.LogWarning(
+            "Failed to publish message {MessageId}. Attempt {Attempt}/{MaxAttempts}. Next attempt at {NextAttemptAtUtc}.",
+            message.Id,
+            message.PublishAttempts,
+            MaxPublishAttempts,
+            message.NextAttemptAtUtc);
+    }
+
+    private void SetDelayOnPublishException(OutboxMessage message, Exception ex, DateTimeOffset? now = null)
+    {
+        var utcNow = now ?? DateTimeOffset.UtcNow;
+
+        var delay = ComputeBackoffDelay(message.PublishAttempts);
+        message.NextAttemptAtUtc = utcNow.Add(delay);
+
+        _logger.LogError(
+            ex,
+            "Exception while publishing message {MessageId}. Attempt {Attempt}/{MaxAttempts}. Next attempt at {NextAttemptAtUtc}.",
+            message.Id,
+            message.PublishAttempts,
+            MaxPublishAttempts,
+            message.NextAttemptAtUtc);
+    }
+
     private static TimeSpan ComputeBackoffDelay(int attempt)
     {
         // attempt starts at 1
