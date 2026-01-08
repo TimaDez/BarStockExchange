@@ -98,9 +98,8 @@ public class OutboxPublisherService : BackgroundService
 
                 SetDelayOnPublishException(message, ex, now);
             }
-
-            await dbContext.SaveChangesAsync(ct);
         }
+        await dbContext.SaveChangesAsync(ct);
     }
 
     private bool TryDeadLetter(OutboxMessage message, Exception? ex = null, string? lastError = null)
